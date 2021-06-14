@@ -1,1 +1,1 @@
-# STAT-434-FInal-Project
+# STAT-434-Final-Project
