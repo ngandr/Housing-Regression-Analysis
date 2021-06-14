@@ -1,0 +1,318 @@
+---
+title: "STAT 434 Final Project"
+author: "Andrew Nguyen"
+date: "5/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=F, warning=F)
+
+library(tidymodels)
+library(tidyverse)
+
+set.seed(94833)
+```
+
+```{r}
+houses <- read_csv("~/SPRING 2021/STAT 434/house-prices-advanced-regression-techniques/train.csv")
+houses_test <- read_csv("~/SPRING 2021/STAT 434/house-prices-advanced-regression-techniques/test.csv")
+head(houses)
+```
+
+```{r}
+cols = names(houses[, sapply(houses, class) == 'character'])
+cols_test = names(houses_test[, sapply(houses_test, class) == 'character'])
+houses[,cols] <- data.frame(apply(houses[cols], 2, as.factor))
+houses_test[,cols] <- data.frame(apply(houses_test[cols_test], 2, as.factor))
+
+houses <- houses %>% 
+  select(-c("Id","Alley","PoolQC","Fence","MiscFeature"))
+  
+```
+
+## Some data visualizations
+
+```{r}
+houses %>% 
+  ggplot(aes(x=LotFrontage,y=SalePrice,color=GarageArea)) +
+  geom_point()
+```
+
+```{r}
+houses %>% 
+  ggplot(aes(x=Neighborhood,y=SalePrice)) +
+  geom_boxplot() +
+  coord_flip()
+```
+
+## Backwards Selection
+
+```{r}
+library(leaps)
+
+models <- regsubsets(SalePrice ~ ., 
+                     data = houses, method = "backward")
+```
+
+```{r}
+which.min(summary(models)$bic)
+```
+```{r}
+mat_back <- summary(models)$outmat[9,]
+names(mat_back[mat_back == "*"])
+```
+
+## Linear Regression with selected variables
+
+```{r}
+houses_cvs <- vfold_cv(houses, v=10)
+
+lr_reg_spec <- linear_reg() %>% 
+  set_mode("regression") %>% 
+  set_engine("lm")
+
+houses_rec_lr <- recipe(SalePrice ~ OverallQual + RoofMatl + BsmtFinSF1 + 
+                    `1stFlrSF` + `2ndFlrSF`, data=houses) %>% 
+  step_log(c(BsmtFinSF1, `2ndFlrSF`), offset = 1)
+
+lr_reg_wflow <- workflow() %>% 
+  add_model(lr_reg_spec) %>% 
+  add_recipe(houses_rec_lr)
+
+lr_reg_wflow_res <- 
+  lr_reg_wflow %>% 
+  fit_resamples(houses_cvs)
+
+lr_reg_wflow_res %>% collect_metrics()
+  
+```
+
+```{r}
+lr_reg_wflw_fit <- lr_reg_wflow %>% fit(houses)
+
+lr_reg_preds <- lr_reg_wflw_fit %>% predict(new_data=houses_test) # test data predictions!!
+```
+
+## K-nearest neighbors
+
+```{r}
+set.seed(94833)
+k_grid <- grid_regular(neighbors(c(1,50)), 
+                       levels = 25)
+
+houses_cv <- vfold_cv(houses, v = 10)
+
+knn_spec_tune <- nearest_neighbor(neighbors = tune()) %>% 
+  set_engine("kknn") %>% 
+  set_mode("regression")
+
+reg_rec <- recipe(SalePrice ~ OverallQual + RoofMatl + BsmtFinSF1 + 
+                    `1stFlrSF` + `2ndFlrSF`, data=houses)
+
+knn_wflow <- workflow() %>% 
+  add_recipe(reg_rec) %>% 
+  add_model(knn_spec_tune)
+
+knn_grid_search <-
+  tune_grid(
+    knn_wflow,
+    resamples = houses_cv,
+    grid = k_grid
+  )
+
+knn_grid_search %>% 
+  collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  slice_min(mean)
+```
+
+```{r}
+knn_spec <- nearest_neighbor(neighbors = 21) %>% 
+  set_engine("kknn") %>% 
+  set_mode("regression")
+
+knn_wflow_best <- workflow() %>% 
+  add_recipe(reg_rec) %>% 
+  add_model(knn_spec)
+
+knn_wflow_best_fit <- knn_wflow_best %>% fit(houses)
+
+knn_wflow_best_fit %>% pull_workflow_fit()
+```
+
+```{r}
+knn_preds <- knn_wflow_best_fit %>% predict(new_data=houses_test)
+
+knn_df = data.frame(houses_test$Id, knn_preds$.pred)
+
+write.csv(knn_df,"~/SPRING 2021/STAT 434/knn_df.csv")
+```
+
+## PCA for dimensionality reduction
+
+```{r}
+houses_dummy <- mltools::one_hot(data.table::as.data.table(houses))
+
+houses_matrix <- houses_dummy %>% 
+  select(-SalePrice) %>% 
+  drop_na() %>% 
+  as.matrix()
+
+houses_matrix <- houses_matrix[ , which(apply(houses_matrix, 2, var) != 0)]
+
+houses_pc <- prcomp(houses_matrix, center=T, scale=T) 
+```
+```{r}
+cumsum(houses_pc$sdev^2)/sum(houses_pc$sdev^2)
+```
+
+```{r}
+houses_pc_df <- houses_pc$rotation %>%
+  as.data.frame() %>%
+  rownames_to_column() 
+
+houses_pc_df %>%
+  arrange(desc(abs(PC1)))
+```
+
+```{r}
+new_dims_df_houses <- houses_pc$x %>%
+  as.data.frame() %>% 
+  mutate(
+    SalePrice = na.omit(houses)$SalePrice
+  )
+
+new_dims_df_houses
+```
+
+```{r}
+new_dims_df_houses %>%
+  ggplot(aes(x = PC1, y = PC2, color=SalePrice)) +
+  geom_point()
+```
+
+```{r}
+houses_sub_pca <- new_dims_df_houses[,c(1:12, 247)]
+pca_reg <- lm(SalePrice ~ ., data=houses_sub_pca)
+summary(pca_reg)
+```
+
+### With step_pca, not manually
+
+```{r}
+houses_rec <- recipe(SalePrice ~ ., data=houses) %>%
+  step_dummy(all_nominal()) %>% 
+  step_medianimpute(all_numeric()) %>% 
+  step_normalize(all_numeric(), -SalePrice) %>% 
+  step_pca(all_numeric(), -SalePrice, 
+           num_comp = 20)
+
+lr_reg_pca_wflow <- workflow() %>% 
+  add_model(lr_reg_spec) %>% 
+  add_recipe(houses_rec)
+
+lr_reg_pca_fit <- lr_reg_pca_wflow %>% fit(houses)
+
+pca_preds <- lr_reg_pca_fit %>% predict(new_data = houses)
+
+temp_df <- data.frame(houses$SalePrice,pca_preds)
+
+rmse(temp_df,truth=houses.SalePrice,estimate=.pred)
+rsq(temp_df,truth=houses.SalePrice,estimate=.pred)
+```
+
+```{r}
+pc_preds <- lr_reg_pca_fit %>% predict(houses_test)
+
+pcadf <- data.frame(houses_test$Id, pc_preds)
+
+write.csv(pcadf,"~/SPRING 2021/STAT 434/pcadf.csv")
+```
+
+## Random Forest
+
+```{r}
+library(randomForest)
+```
+```{r}
+rf_spec <- rand_forest() %>% 
+  set_engine('randomForest') %>% 
+  set_mode("regression")
+
+rf_wflow_res <- workflow() %>% 
+  add_recipe(
+    recipe(SalePrice ~ ., data=houses) %>%
+    step_dummy(all_nominal()) %>%
+    step_medianimpute(all_numeric()) %>% 
+    step_normalize(all_numeric(), -SalePrice)
+  ) %>% 
+  add_model(rf_spec) %>% 
+  fit_resamples(houses_cvs)
+
+rf_wflow_res %>% 
+  collect_metrics()
+```
+
+```{r}
+rf_wflow_fit <- workflow() %>% 
+  add_recipe(
+    recipe(SalePrice ~ ., data=houses) %>%
+    step_dummy(all_nominal()) %>%
+    step_medianimpute(all_numeric()) %>% 
+    step_normalize(all_numeric(), -SalePrice)
+  ) %>% 
+  add_model(rf_spec) %>% 
+  fit(houses)
+
+rf_preds_test = rf_wflow_fit %>% predict(new_data = houses_test)
+
+rfdf <- data.frame(houses_test$Id, rf_preds_test)
+
+write.csv(rfdf,"~/SPRING 2021/STAT 434/rfdf.csv")
+```
+
+## Boosted tree regression
+
+```{r}
+bt_spec <- boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+bt_wflow_res <- workflow() %>% 
+  add_recipe(
+    recipe(SalePrice ~ ., data=houses) %>%
+    step_dummy(all_nominal()) %>% 
+    step_medianimpute(all_numeric()) %>% 
+    step_normalize(all_numeric(), -SalePrice)
+  ) %>% 
+  add_model(bt_spec) %>% 
+  fit_resamples(houses_cvs)
+
+bt_wflow_res %>% 
+  collect_metrics()
+```
+
+```{r}
+bt_wflow_fit <- workflow() %>% 
+  add_recipe(
+    recipe(SalePrice ~ ., data=houses) %>%
+    step_dummy(all_nominal()) %>% 
+    step_medianimpute(all_numeric()) %>% 
+    step_normalize(all_numeric(), -SalePrice)
+  ) %>% 
+  add_model(bt_spec) %>% 
+  fit(houses)
+
+bt_preds <- bt_wflow_fit %>% predict(new_data=houses_test)
+
+btdf <- data.frame(houses_test$Id, bt_preds)
+
+write.csv(btdf,"~/SPRING 2021/STAT 434/btdf.csv")
+```
+
+
+## Conclusion
+
+Through cross-validation, it seems that the gradient boosting trees algorithm is best at predicting house prices. It has the lowest average RMSE of 26700 and mean R2 of .921. 
+
