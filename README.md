@@ -10,3 +10,5 @@ Modern methods in predictive modeling and classification. Splines, smoothing spl
 
 
 Kaggle challenge: predict house prices using advanced regression techniques.
+
+The full video demo can be found here: https://www.youtube.com/watch?v=NUUkSHzzCNw
